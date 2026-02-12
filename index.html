@@ -2,514 +2,251 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no" />
-  <title>Pencil-only Signature</title>
+  <meta name="viewport"
+        content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1,user-scalable=no" />
+  <title>Signature</title>
   <style>
-    html, body { height: 100%; }
+    /* IMPORTANT: no scrolling, app-like layout */
+    html, body { height: 100%; margin: 0; overflow: hidden; }
     body {
       font-family: system-ui, -apple-system, sans-serif;
-      margin: 24px;
+      display: flex;
+      flex-direction: column;
+      padding: 16px;
+      box-sizing: border-box;
       -webkit-user-select: none;
       user-select: none;
-      overscroll-behavior: none;
+      background: #fff;
     }
 
-    /* Applied only while signing (prevents page movement / rubber-banding) */
-    body.scroll-locked {
-      position: fixed;
-      width: 100%;
-      overflow: hidden;
-      left: 0;
-      right: 0;
-    }
+    header { flex: 0 0 auto; }
+    .controls { flex: 0 0 auto; display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin: 10px 0; }
 
+    /* signature area grows to fill remaining space */
     .sig-wrap {
+      flex: 1 1 auto;
+      min-height: 0;
       position: relative;
-      width: min(900px, 100%);
-      height: 260px;
       border: 1px solid rgba(0,0,0,.15);
       border-radius: 16px;
       overflow: hidden;
       background: transparent;
-      touch-action: none; /* important: block gestures in this region */
+
+      /* critical for iOS gesture suppression in this region */
+      touch-action: none;
     }
+
     canvas {
       width: 100%;
       height: 100%;
       display: block;
       touch-action: none;
     }
+
     .sig-line {
       position: absolute;
-      left: 24px;
-      right: 24px;
+      left: 24px; right: 24px;
       top: 72%;
       height: 1px;
       background: rgba(0,0,0,.45);
       pointer-events: none;
     }
-    .hint {
-      position: absolute;
-      left: 12px; top: 12px;
-      padding: 8px 10px;
-      border-radius: 10px;
-      background: rgba(0,0,0,.65);
-      color: white;
-      font-size: 14px;
-      pointer-events: none;
-      opacity: 0;
-      transition: opacity .15s ease;
-    }
-    .hint.show { opacity: 1; }
 
-    .row { display: flex; gap: 10px; margin-top: 12px; align-items: center; flex-wrap: wrap; }
-    button {
-      padding: 10px 14px;
-      border-radius: 10px;
-      border: 1px solid rgba(0,0,0,.2);
-      background: white;
-      cursor: pointer;
-    }
-    button.primary { background: #0a66ff; color: white; border-color: #0a66ff; }
     .seg {
-      display: inline-flex;
-      border: 1px solid rgba(0,0,0,.2);
-      border-radius: 10px;
-      overflow: hidden;
+      display:inline-flex;
+      border:1px solid rgba(0,0,0,.2);
+      border-radius:10px;
+      overflow:hidden;
     }
-    .seg button {
-      border: 0;
-      border-right: 1px solid rgba(0,0,0,.2);
-      border-radius: 0;
-      background: white;
-    }
-    .seg button:last-child { border-right: 0; }
+    .seg button { border:0; padding:10px 14px; background:#fff; }
     .seg button.active { background: rgba(10,102,255,.12); }
 
-    .mini {
-      margin-top: 12px;
-      max-width: 420px;
-      border: 1px solid rgba(0,0,0,.15);
-      border-radius: 12px;
-      padding: 10px;
+    button {
+      padding:10px 14px; border-radius:10px;
+      border:1px solid rgba(0,0,0,.2); background:#fff;
     }
-    .mini img { max-width: 100%; display:block; }
+    button.primary { background:#0a66ff; border-color:#0a66ff; color:#fff; }
+
+    #out { flex: 0 0 auto; }
   </style>
 </head>
 
 <body>
-  <h2>Sign with Apple Pencil</h2>
+  <header>
+    <h2 style="margin:0 0 6px 0;">Sign with Apple Pencil</h2>
+  </header>
 
-  <div class="sig-wrap">
-    <canvas id="sig"></canvas>
-    <div class="sig-line" id="line"></div>
-    <div class="hint" id="hint">Apple Pencil only</div>
-  </div>
-
-  <div class="row">
-    <div class="seg" aria-label="Ink color">
+  <div class="controls">
+    <div class="seg">
       <button id="inkBlack" class="active" type="button">Black</button>
       <button id="inkBlue" type="button">Blue</button>
     </div>
-
     <button id="clear" type="button">Clear</button>
-    <button class="primary" id="save" type="button">Save PNG (cropped, transparent)</button>
+    <button id="save" class="primary" type="button">Save PNG</button>
+  </div>
+
+  <div class="sig-wrap" id="pad">
+    <canvas id="sig"></canvas>
+    <div class="sig-line" id="line"></div>
   </div>
 
   <div id="out"></div>
 
   <script>
+    const pad = document.getElementById('pad');
     const canvas = document.getElementById('sig');
-    const ctx = canvas.getContext('2d');
-    const out = document.getElementById('out');
+    const ctx = canvas.getContext('2d', { willReadFrequently: false });
     const line = document.getElementById('line');
-    const hint = document.getElementById('hint');
+    const out = document.getElementById('out');
 
-    // -------- Ink options (sharper feel = thinner base) --------
-    let inkColor = '#000000';
-    const BASE_WIDTH = 2.2;       // try 2.0–2.6
-    const PRESSURE_BOOST = 1.4;   // set 0 for fixed-width
+    // ---- Ink ----
+    let inkColor = '#000';
+    const inkBlackBtn = document.getElementById('inkBlack');
+    const inkBlueBtn = document.getElementById('inkBlue');
 
-    function setInk(color) {
-      inkColor = color;
-      document.getElementById('inkBlack').classList.toggle('active', color === '#000000');
-      document.getElementById('inkBlue').classList.toggle('active', color === '#0a66ff');
+    function setInk(c) {
+      inkColor = c;
+      inkBlackBtn.classList.toggle('active', c === '#000');
+      inkBlueBtn.classList.toggle('active', c !== '#000');
     }
-    document.getElementById('inkBlack').addEventListener('click', () => setInk('#000000'));
-    document.getElementById('inkBlue').addEventListener('click', () => setInk('#0a66ff'));
+    inkBlackBtn.onclick = () => setInk('#000');
+    inkBlueBtn.onclick  = () => setInk('#0a66ff');
 
-    function showHint() {
-      hint.classList.add('show');
-      clearTimeout(showHint._t);
-      showHint._t = setTimeout(() => hint.classList.remove('show'), 650);
-    }
+    // ---- Hi-DPI sizing ----
+    let dpr = 1;
+    function resize() {
+      const r = canvas.getBoundingClientRect();
+      dpr = window.devicePixelRatio || 1;
 
-    function strokeWidth(p) {
-      const pressure = Math.max(0, Math.min(1, p ?? 0.5));
-      return BASE_WIDTH + PRESSURE_BOOST * pressure;
-    }
+      canvas.width = Math.round(r.width * dpr);
+      canvas.height = Math.round(r.height * dpr);
 
-    function midpoint(a, b) {
-      return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-    }
+      // draw in CSS px
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    // -------- Robust scroll/gesture lock while signing --------
-    let lockedScrollY = 0;
-    let signing = false;
-
-    function lockScroll() {
-      if (signing) return;
-      signing = true;
-      lockedScrollY = window.scrollY || 0;
-      document.body.classList.add('scroll-locked');
-      document.body.style.top = `-${lockedScrollY}px`;
-    }
-
-    function unlockScroll() {
-      if (!signing) return;
-      signing = false;
-      document.body.classList.remove('scroll-locked');
-      document.body.style.top = '';
-      window.scrollTo(0, lockedScrollY);
-    }
-
-    // Extra belt-and-suspenders: block pinch zoom gestures on iOS
-    // (Safari emits gesture* events)
-    function blockIfSigning(e) {
-      if (signing) e.preventDefault();
-    }
-    document.addEventListener('touchmove', blockIfSigning, { passive: false });
-    document.addEventListener('gesturestart', blockIfSigning, { passive: false });
-    document.addEventListener('gesturechange', blockIfSigning, { passive: false });
-    document.addEventListener('gestureend', blockIfSigning, { passive: false });
-
-    // -------- Canvas sizing (keep it light while drawing) --------
-    let renderScale = 1;
-
-    function resizeCanvas() {
-      const rect = canvas.getBoundingClientRect();
-      const dpr = window.devicePixelRatio || 1;
-      renderScale = dpr; // keep interactive canvas light (robust)
-      canvas.width = Math.round(rect.width * renderScale);
-      canvas.height = Math.round(rect.height * renderScale);
-      ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       ctx.miterLimit = 2;
-      redrawAll(); // re-render strokes after resize
     }
-    window.addEventListener('resize', resizeCanvas);
+    window.addEventListener('resize', resize);
+    resize();
 
-    // -------- Store strokes as vectors for perfect export --------
-    let strokes = [];           // [{color, points:[{x,y,p}]}]
-    let currentStroke = null;
+    // ---- KEY ROBUSTNESS FIX #1:
+    // Prevent default for ANY pointer interaction inside the pad (including palms),
+    // so Safari never starts a pan/scroll gesture.
+    const blockAllPointerDefaults = (e) => {
+      e.preventDefault();
+    };
+    pad.addEventListener('pointerdown', blockAllPointerDefaults, { passive: false });
+    pad.addEventListener('pointermove', blockAllPointerDefaults, { passive: false });
+    pad.addEventListener('pointerup', blockAllPointerDefaults, { passive: false });
+    pad.addEventListener('pointercancel', blockAllPointerDefaults, { passive: false });
 
-    // bounds in CSS pixels (for cropping without scanning pixels)
-    let bounds = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
-    function resetBounds() {
-      bounds = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
-    }
-    function expandBounds(pt, w) {
-      const hw = w / 2;
-      bounds.minX = Math.min(bounds.minX, pt.x - hw);
-      bounds.minY = Math.min(bounds.minY, pt.y - hw);
-      bounds.maxX = Math.max(bounds.maxX, pt.x + hw);
-      bounds.maxY = Math.max(bounds.maxY, pt.y + hw);
-    }
-    function hasInk() {
-      return Number.isFinite(bounds.minX);
-    }
+    // Optional: also block touchmove at document level to avoid rubber-banding
+    document.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
 
-    function getPt(e) {
+    // ---- Drawing (pencil only) ----
+    let drawing = false;
+    let activePenId = null;
+    let points = [];
+
+    const BASE_WIDTH = 2.2;      // "sharper" feel
+    const PRESSURE_BOOST = 1.2;  // set 0 for fixed width
+
+    function widthFor(p) {
+      const pr = Math.max(0, Math.min(1, p ?? 0.5));
+      return BASE_WIDTH + PRESSURE_BOOST * pr;
+    }
+    function mid(a,b){ return {x:(a.x+b.x)/2, y:(a.y+b.y)/2}; }
+    function ptFrom(e){
       const r = canvas.getBoundingClientRect();
       return { x: e.clientX - r.left, y: e.clientY - r.top, p: e.pressure ?? 0.5 };
     }
 
-    // -------- Draw incrementally using rAF (more stable under load) --------
-    let pending = [];
-    let rafId = 0;
-
-    function drawDot(pt, color) {
-      ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.arc(pt.x, pt.y, strokeWidth(pt.p) / 2, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    function drawLatestSegment(stroke) {
-      const pts = stroke.points;
-      const n = pts.length;
-      ctx.strokeStyle = stroke.color;
-
-      if (n === 1) {
-        drawDot(pts[0], stroke.color);
-        return;
-      }
-      if (n === 2) {
-        ctx.lineWidth = strokeWidth(pts[1].p);
-        ctx.beginPath();
-        ctx.moveTo(pts[0].x, pts[0].y);
-        ctx.lineTo(pts[1].x, pts[1].y);
-        ctx.stroke();
-        return;
-      }
-
-      const p0 = pts[n - 3], p1 = pts[n - 2], p2 = pts[n - 1];
-      const m1 = midpoint(p0, p1);
-      const m2 = midpoint(p1, p2);
-
-      ctx.lineWidth = strokeWidth(p1.p);
-      ctx.beginPath();
-      ctx.moveTo(m1.x, m1.y);
-      ctx.quadraticCurveTo(p1.x, p1.y, m2.x, m2.y);
-      ctx.stroke();
-    }
-
-    function flush() {
-      rafId = 0;
-      if (!currentStroke) return;
-
-      while (pending.length) {
-        const pt = pending.shift();
-        currentStroke.points.push(pt);
-
-        const w = strokeWidth(pt.p);
-        expandBounds(pt, w);
-
-        drawLatestSegment(currentStroke);
-      }
-    }
-
-    function scheduleFlush() {
-      if (rafId) return;
-      rafId = requestAnimationFrame(flush);
-    }
-
-    // -------- Robust pointer handling (window listeners + id tracking) --------
-    let activePenId = null;
-
     function onMove(e) {
-      if (!currentStroke) return;
+      if (!drawing) return;
       if (e.pointerId !== activePenId) return;
       if (e.pointerType !== 'pen') return;
 
-      pending.push(getPt(e));
-      scheduleFlush();
-      e.preventDefault();
+      const p = ptFrom(e);
+      points.push(p);
+
+      ctx.strokeStyle = inkColor;
+
+      const n = points.length;
+      if (n === 2) {
+        ctx.lineWidth = widthFor(points[1].p);
+        ctx.beginPath();
+        ctx.moveTo(points[0].x, points[0].y);
+        ctx.lineTo(points[1].x, points[1].y);
+        ctx.stroke();
+      } else if (n >= 3) {
+        const p0 = points[n-3], p1 = points[n-2], p2 = points[n-1];
+        const m1 = mid(p0,p1), m2 = mid(p1,p2);
+        ctx.lineWidth = widthFor(p1.p);
+        ctx.beginPath();
+        ctx.moveTo(m1.x, m1.y);
+        ctx.quadraticCurveTo(p1.x, p1.y, m2.x, m2.y);
+        ctx.stroke();
+      }
     }
 
     function endStroke(e) {
       if (e.pointerId !== activePenId) return;
-
-      // flush remaining points before ending
-      flush();
-
+      drawing = false;
+      activePenId = null;
       window.removeEventListener('pointermove', onMove, { passive: false });
       window.removeEventListener('pointerup', endStroke, { passive: false });
-      window.removeEventListener('pointercancel', cancelStroke, { passive: false });
-
-      activePenId = null;
-      currentStroke = null;
-      pending = [];
-
-      unlockScroll();
-      e.preventDefault();
+      window.removeEventListener('pointercancel', endStroke, { passive: false });
     }
 
-    function cancelStroke(e) {
-      // Safari cancels when it detects a scroll/gesture; we treat it as end, but keep data.
-      endStroke(e);
-    }
+    // Real draw handler (separate from the default-blocker)
+    pad.addEventListener('pointerdown', (e) => {
+      // pencil only
+      if (e.pointerType !== 'pen') return;
 
-    canvas.addEventListener('pointerdown', (e) => {
-      if (e.pointerType !== 'pen') { showHint(); return; }
-
-      // prevent page movement (this is the big robustness fix)
-      lockScroll();
-
+      drawing = true;
       activePenId = e.pointerId;
+      points = [];
 
-      const pt = getPt(e);
-      currentStroke = { color: inkColor, points: [pt] };
-      strokes.push(currentStroke);
+      const p = ptFrom(e);
+      points.push(p);
 
-      const w = strokeWidth(pt.p);
-      expandBounds(pt, w);
+      // dot for taps
+      ctx.fillStyle = inkColor;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, widthFor(p.p) / 2, 0, Math.PI * 2);
+      ctx.fill();
 
-      drawDot(pt, inkColor);
-
-      // listen on window (more robust than relying on element capture alone)
+      // IMPORTANT: listen on window so we don’t lose the stream
       window.addEventListener('pointermove', onMove, { passive: false });
       window.addEventListener('pointerup', endStroke, { passive: false });
-      window.addEventListener('pointercancel', cancelStroke, { passive: false });
-
-      e.preventDefault();
+      window.addEventListener('pointercancel', endStroke, { passive: false });
     }, { passive: false });
 
-    // Optional: block context menu selection
-    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-
-    function redrawAll() {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      // re-draw all stored strokes
-      for (const s of strokes) {
-        const pts = s.points;
-        if (!pts.length) continue;
-
-        // dot
-        ctx.fillStyle = s.color;
-        ctx.strokeStyle = s.color;
-
-        if (pts.length === 1) {
-          drawDot(pts[0], s.color);
-          continue;
-        }
-
-        // first segment
-        ctx.lineWidth = strokeWidth(pts[1].p);
-        ctx.beginPath();
-        ctx.moveTo(pts[0].x, pts[0].y);
-        ctx.lineTo(pts[1].x, pts[1].y);
-        ctx.stroke();
-
-        // smoothed segments
-        for (let i = 2; i < pts.length; i++) {
-          const p0 = pts[i - 2], p1 = pts[i - 1], p2 = pts[i];
-          const m1 = midpoint(p0, p1);
-          const m2 = midpoint(p1, p2);
-
-          ctx.lineWidth = strokeWidth(p1.p);
-          ctx.beginPath();
-          ctx.moveTo(m1.x, m1.y);
-          ctx.quadraticCurveTo(p1.x, p1.y, m2.x, m2.y);
-          ctx.stroke();
-        }
-      }
-    }
-
-    // initialize sizing after functions exist
-    resizeCanvas();
-
-    // -------- Clear --------
-    document.getElementById('clear').addEventListener('click', () => {
-      strokes = [];
-      currentStroke = null;
-      pending = [];
-      activePenId = null;
-      resetBounds();
+    // ---- Clear ----
+    document.getElementById('clear').onclick = () => {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       out.innerHTML = '';
       line.style.display = ''; // show again
-      unlockScroll();
-    });
+    };
 
-    // -------- Export (cropped, transparent) by re-rendering at higher scale --------
-    function renderToExportCanvas(paddingCssPx = 24) {
-      if (!hasInk()) return null;
-
-      const pad = paddingCssPx;
-      const minX = Math.max(0, bounds.minX - pad);
-      const minY = Math.max(0, bounds.minY - pad);
-      const maxX = bounds.maxX + pad;
-      const maxY = bounds.maxY + pad;
-
-      const wCss = Math.max(1, maxX - minX);
-      const hCss = Math.max(1, maxY - minY);
-
-      const exportScale = (window.devicePixelRatio || 1) * 2; // crisp output
-      const c = document.createElement('canvas');
-      c.width = Math.ceil(wCss * exportScale);
-      c.height = Math.ceil(hCss * exportScale);
-
-      const ectx = c.getContext('2d');
-      ectx.setTransform(exportScale, 0, 0, exportScale, 0, 0);
-      ectx.translate(-minX, -minY);
-      ectx.lineCap = 'round';
-      ectx.lineJoin = 'round';
-      ectx.miterLimit = 2;
-
-      // draw strokes onto export canvas
-      for (const s of strokes) {
-        const pts = s.points;
-        if (!pts.length) continue;
-
-        ectx.strokeStyle = s.color;
-        ectx.fillStyle = s.color;
-
-        if (pts.length === 1) {
-          ectx.beginPath();
-          ectx.arc(pts[0].x, pts[0].y, strokeWidth(pts[0].p)/2, 0, Math.PI*2);
-          ectx.fill();
-          continue;
-        }
-
-        ectx.lineWidth = strokeWidth(pts[1].p);
-        ectx.beginPath();
-        ectx.moveTo(pts[0].x, pts[0].y);
-        ectx.lineTo(pts[1].x, pts[1].y);
-        ectx.stroke();
-
-        for (let i = 2; i < pts.length; i++) {
-          const p0 = pts[i - 2], p1 = pts[i - 1], p2 = pts[i];
-          const m1 = midpoint(p0, p1);
-          const m2 = midpoint(p1, p2);
-
-          ectx.lineWidth = strokeWidth(p1.p);
-          ectx.beginPath();
-          ectx.moveTo(m1.x, m1.y);
-          ectx.quadraticCurveTo(p1.x, p1.y, m2.x, m2.y);
-          ectx.stroke();
-        }
-      }
-
-      return c;
-    }
-
-    function canvasToPngBlob(c) {
-      return new Promise((resolve) => c.toBlob(resolve, 'image/png'));
-    }
-
-    // -------- Save --------
-    document.getElementById('save').addEventListener('click', async () => {
-      // end any active stroke cleanly
-      if (signing) unlockScroll();
-
-      const exportCanvas = renderToExportCanvas(26);
-      if (!exportCanvas) {
-        alert('Please sign with Apple Pencil before saving.');
-        return;
-      }
-
-      const blob = await canvasToPngBlob(exportCanvas);
-      if (!blob) return;
-
-      // Requirement: line goes away after they click save
+    // ---- Save (simple version: export full canvas; plug your crop logic here) ----
+    document.getElementById('save').onclick = async () => {
+      // hide line only after save click
       line.style.display = 'none';
 
+      const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
       const url = URL.createObjectURL(blob);
 
       out.innerHTML = `
-        <div class="row">
+        <div style="margin-top:12px;display:flex;gap:10px;flex-wrap:wrap;">
           <a download="signature.png" href="${url}">
             <button class="primary" type="button">Download signature.png</button>
           </a>
-          <button id="shareBtn" type="button">Share…</button>
-        </div>
-        <div class="mini">
-          <div style="margin-bottom:8px;opacity:.7">Preview</div>
-          <img alt="Signature preview" src="${url}" />
         </div>
       `;
-
-      document.getElementById('shareBtn').addEventListener('click', async () => {
-        const file = new File([blob], "signature.png", { type: "image/png" });
-        if (navigator.canShare?.({ files: [file] }) && navigator.share) {
-          await navigator.share({ files: [file] });
-        } else {
-          alert("Sharing isn't available here — use Download instead.");
-        }
-      });
-    });
+    };
   </script>
 </body>
 </html>
