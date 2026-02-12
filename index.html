@@ -19,7 +19,7 @@
       width: 100%;
       height: 100%;
       display: block;
-      touch-action: none; /* prevent scrolling/zoom gestures in the signing box */
+      touch-action: none;
     }
     .sig-line {
       position: absolute;
@@ -43,9 +43,30 @@
       transition: opacity .15s ease;
     }
     .hint.show { opacity: 1; }
-    .row { display: flex; gap: 12px; margin-top: 12px; align-items: center; flex-wrap: wrap; }
-    button { padding: 10px 14px; border-radius: 10px; border: 1px solid rgba(0,0,0,.2); background: white; }
+
+    .row { display: flex; gap: 10px; margin-top: 12px; align-items: center; flex-wrap: wrap; }
+    button {
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 1px solid rgba(0,0,0,.2);
+      background: white;
+      cursor: pointer;
+    }
     button.primary { background: #0a66ff; color: white; border-color: #0a66ff; }
+    .seg {
+      display: inline-flex;
+      border: 1px solid rgba(0,0,0,.2);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .seg button {
+      border: 0;
+      border-right: 1px solid rgba(0,0,0,.2);
+      border-radius: 0;
+      background: white;
+    }
+    .seg button:last-child { border-right: 0; }
+    .seg button.active { background: rgba(10,102,255,.12); }
     img { margin-top: 14px; max-width: 100%; border: 1px solid rgba(0,0,0,.15); border-radius: 12px; }
   </style>
 </head>
@@ -59,33 +80,37 @@
   </div>
 
   <div class="row">
-    <button id="clear">Clear</button>
-    <button class="primary" id="save">Save PNG (cropped, transparent)</button>
+    <div class="seg" aria-label="Ink color">
+      <button id="inkBlack" class="active" type="button">Black</button>
+      <button id="inkBlue" type="button">Blue</button>
+    </div>
+
+    <button id="clear" type="button">Clear</button>
+    <button class="primary" id="save" type="button">Save PNG (cropped, transparent)</button>
   </div>
 
   <div id="out"></div>
 
   <script>
     const canvas = document.getElementById('sig');
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
     const out = document.getElementById('out');
     const line = document.getElementById('line');
     const hint = document.getElementById('hint');
 
-    // Hi-DPI sizing
-    function resizeCanvas() {
-      const rect = canvas.getBoundingClientRect();
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width = Math.round(rect.width * dpr);
-      canvas.height = Math.round(rect.height * dpr);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // draw in CSS pixels
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.strokeStyle = '#000';
-      ctx.lineWidth = 4;
+    // --- Ink options ---
+    let inkColor = '#000000'; // black
+    // Thinner looks "sharper". Try 2.2–3.2 depending on preference.
+    const BASE_WIDTH = 2.6;
+    const PRESSURE_BOOST = 1.8; // set to 0 for fixed width
+
+    function setInk(color) {
+      inkColor = color;
+      document.getElementById('inkBlack').classList.toggle('active', color === '#000000');
+      document.getElementById('inkBlue').classList.toggle('active', color === '#0a66ff');
     }
-    resizeCanvas();
-    window.addEventListener('resize', resizeCanvas);
+    document.getElementById('inkBlack').addEventListener('click', () => setInk('#000000'));
+    document.getElementById('inkBlue').addEventListener('click', () => setInk('#0a66ff'));
 
     function showHint() {
       hint.classList.add('show');
@@ -93,29 +118,62 @@
       showHint._t = setTimeout(() => hint.classList.remove('show'), 650);
     }
 
-    let drawing = false;
-    let hasInk = false;
+    // --- High DPI / sharper export ---
+    // Using 2× DPR makes saved PNG noticeably crisper.
+    let renderScale = 1;
+
+    function resizeCanvas() {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      renderScale = dpr * 2; // <-- key for sharper output
+
+      canvas.width = Math.round(rect.width * renderScale);
+      canvas.height = Math.round(rect.height * renderScale);
+
+      // Draw using CSS-pixel coordinates (PointerEvent gives CSS pixels)
+      ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
+
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.miterLimit = 2;
+    }
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
 
     function getXY(e) {
       const r = canvas.getBoundingClientRect();
-      return { x: e.clientX - r.left, y: e.clientY - r.top };
+      return { x: e.clientX - r.left, y: e.clientY - r.top, p: (e.pressure || 0.5) };
+    }
+
+    // --- Pencil-only drawing with smoothing ---
+    let drawing = false;
+    let points = []; // {x,y,p}
+
+    function strokeWidth(p) {
+      // mild pressure response (optional)
+      return BASE_WIDTH + (PRESSURE_BOOST * Math.max(0, Math.min(1, p)));
+    }
+
+    function midpoint(a, b) {
+      return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
     }
 
     canvas.addEventListener('pointerdown', (e) => {
-      // Pencil-only
       if (e.pointerType !== 'pen') { showHint(); return; }
 
-      if (!hasInk) {
-        hasInk = true;
-        line.style.display = 'none';
-      }
-
       drawing = true;
+      points = [];
       canvas.setPointerCapture(e.pointerId);
 
-      const { x, y } = getXY(e);
+      const pt = getXY(e);
+      points.push(pt);
+
+      // Start a tiny dot for taps
       ctx.beginPath();
-      ctx.moveTo(x, y);
+      ctx.fillStyle = inkColor;
+      ctx.arc(pt.x, pt.y, strokeWidth(pt.p) / 2, 0, Math.PI * 2);
+      ctx.fill();
+
       e.preventDefault();
     });
 
@@ -123,9 +181,32 @@
       if (!drawing) return;
       if (e.pointerType !== 'pen') return;
 
-      const { x, y } = getXY(e);
-      ctx.lineTo(x, y);
-      ctx.stroke();
+      const pt = getXY(e);
+      points.push(pt);
+
+      ctx.strokeStyle = inkColor;
+
+      // Draw smooth curve using last 3 points
+      const n = points.length;
+      if (n === 2) {
+        const p0 = points[0], p1 = points[1];
+        ctx.lineWidth = strokeWidth(p1.p);
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+        ctx.lineTo(p1.x, p1.y);
+        ctx.stroke();
+      } else if (n >= 3) {
+        const p0 = points[n - 3], p1 = points[n - 2], p2 = points[n - 1];
+        const m1 = midpoint(p0, p1);
+        const m2 = midpoint(p1, p2);
+
+        ctx.lineWidth = strokeWidth(p1.p);
+        ctx.beginPath();
+        ctx.moveTo(m1.x, m1.y);
+        ctx.quadraticCurveTo(p1.x, p1.y, m2.x, m2.y);
+        ctx.stroke();
+      }
+
       e.preventDefault();
     });
 
@@ -138,14 +219,15 @@
     canvas.addEventListener('pointerup', end);
     canvas.addEventListener('pointercancel', end);
 
+    // --- Clear ---
     document.getElementById('clear').addEventListener('click', () => {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       out.innerHTML = '';
-      hasInk = false;
-      line.style.display = '';
+      line.style.display = ''; // show again
     });
 
-    function cropToInk(padding = 36) {
+    // --- Crop to ink (transparent) ---
+    function cropToInk(paddingCssPx = 28) {
       const w = canvas.width, h = canvas.height;
       const img = ctx.getImageData(0, 0, w, h);
       const data = img.data;
@@ -155,7 +237,7 @@
       for (let y = 0; y < h; y++) {
         for (let x = 0; x < w; x++) {
           const i = (y * w + x) * 4;
-          if (data[i + 3] > 0) { // alpha
+          if (data[i + 3] > 0) {
             if (x < minX) minX = x;
             if (y < minY) minY = y;
             if (x > maxX) maxX = x;
@@ -165,10 +247,13 @@
       }
       if (maxX < 0) return null;
 
-      minX = Math.max(0, minX - padding);
-      minY = Math.max(0, minY - padding);
-      maxX = Math.min(w - 1, maxX + padding);
-      maxY = Math.min(h - 1, maxY + padding);
+      // padding passed in CSS px; convert to internal pixels
+      const pad = Math.round(paddingCssPx * renderScale);
+
+      minX = Math.max(0, minX - pad);
+      minY = Math.max(0, minY - pad);
+      maxX = Math.min(w - 1, maxX + pad);
+      maxY = Math.min(h - 1, maxY + pad);
 
       const cw = maxX - minX + 1;
       const ch = maxY - minY + 1;
@@ -176,9 +261,10 @@
       const cropped = document.createElement('canvas');
       cropped.width = cw;
       cropped.height = ch;
-      const cctx = cropped.getContext('2d');
 
+      const cctx = cropped.getContext('2d');
       cctx.putImageData(ctx.getImageData(minX, minY, cw, ch), 0, 0);
+
       return cropped;
     }
 
@@ -186,8 +272,9 @@
       return new Promise((resolve) => c.toBlob(resolve, 'image/png'));
     }
 
+    // --- Save ---
     document.getElementById('save').addEventListener('click', async () => {
-      const cropped = cropToInk(36);
+      const cropped = cropToInk(30);
       if (!cropped) {
         alert('Please sign with Apple Pencil before saving.');
         return;
@@ -196,25 +283,25 @@
       const blob = await canvasToPngBlob(cropped);
       if (!blob) return;
 
+      // Requirement: line goes away after Save
+      line.style.display = 'none';
+
       const url = URL.createObjectURL(blob);
 
-      // Preview + download fallback
       out.innerHTML = `
         <div class="row">
           <a download="signature.png" href="${url}">
-            <button class="primary">Download signature.png</button>
+            <button class="primary" type="button">Download signature.png</button>
           </a>
-          <button id="shareBtn">Share…</button>
+          <button id="shareBtn" type="button">Share…</button>
         </div>
         <img alt="Signature preview" src="${url}" />
       `;
 
-      // Share sheet (best way to get into Files / another app). Works in supported Safari contexts.
-      // Navigator.share is the Web Share API. :contentReference[oaicite:1]{index=1}
       document.getElementById('shareBtn').addEventListener('click', async () => {
         const file = new File([blob], "signature.png", { type: "image/png" });
         if (navigator.canShare?.({ files: [file] }) && navigator.share) {
-          await navigator.share({ files: [file], title: "Signature" });
+          await navigator.share({ files: [file] });
         } else {
           alert("Sharing isn't available here — use Download instead.");
         }
