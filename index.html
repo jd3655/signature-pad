@@ -2,10 +2,27 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no" />
   <title>Pencil-only Signature</title>
   <style>
-    body { font-family: system-ui, -apple-system, sans-serif; margin: 24px; }
+    html, body { height: 100%; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      margin: 24px;
+      -webkit-user-select: none;
+      user-select: none;
+      overscroll-behavior: none;
+    }
+
+    /* Applied only while signing (prevents page movement / rubber-banding) */
+    body.scroll-locked {
+      position: fixed;
+      width: 100%;
+      overflow: hidden;
+      left: 0;
+      right: 0;
+    }
+
     .sig-wrap {
       position: relative;
       width: min(900px, 100%);
@@ -14,6 +31,7 @@
       border-radius: 16px;
       overflow: hidden;
       background: transparent;
+      touch-action: none; /* important: block gestures in this region */
     }
     canvas {
       width: 100%;
@@ -67,9 +85,18 @@
     }
     .seg button:last-child { border-right: 0; }
     .seg button.active { background: rgba(10,102,255,.12); }
-    img { margin-top: 14px; max-width: 100%; border: 1px solid rgba(0,0,0,.15); border-radius: 12px; }
+
+    .mini {
+      margin-top: 12px;
+      max-width: 420px;
+      border: 1px solid rgba(0,0,0,.15);
+      border-radius: 12px;
+      padding: 10px;
+    }
+    .mini img { max-width: 100%; display:block; }
   </style>
 </head>
+
 <body>
   <h2>Sign with Apple Pencil</h2>
 
@@ -93,16 +120,15 @@
 
   <script>
     const canvas = document.getElementById('sig');
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const ctx = canvas.getContext('2d');
     const out = document.getElementById('out');
     const line = document.getElementById('line');
     const hint = document.getElementById('hint');
 
-    // --- Ink options ---
-    let inkColor = '#000000'; // black
-    // Thinner looks "sharper". Try 2.2–3.2 depending on preference.
-    const BASE_WIDTH = 2.6;
-    const PRESSURE_BOOST = 1.8; // set to 0 for fixed width
+    // -------- Ink options (sharper feel = thinner base) --------
+    let inkColor = '#000000';
+    const BASE_WIDTH = 2.2;       // try 2.0–2.6
+    const PRESSURE_BOOST = 1.4;   // set 0 for fixed-width
 
     function setInk(color) {
       inkColor = color;
@@ -118,172 +144,346 @@
       showHint._t = setTimeout(() => hint.classList.remove('show'), 650);
     }
 
-    // --- High DPI / sharper export ---
-    // Using 2× DPR makes saved PNG noticeably crisper.
-    let renderScale = 1;
-
-    function resizeCanvas() {
-      const rect = canvas.getBoundingClientRect();
-      const dpr = window.devicePixelRatio || 1;
-      renderScale = dpr * 2; // <-- key for sharper output
-
-      canvas.width = Math.round(rect.width * renderScale);
-      canvas.height = Math.round(rect.height * renderScale);
-
-      // Draw using CSS-pixel coordinates (PointerEvent gives CSS pixels)
-      ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
-
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.miterLimit = 2;
-    }
-    resizeCanvas();
-    window.addEventListener('resize', resizeCanvas);
-
-    function getXY(e) {
-      const r = canvas.getBoundingClientRect();
-      return { x: e.clientX - r.left, y: e.clientY - r.top, p: (e.pressure || 0.5) };
-    }
-
-    // --- Pencil-only drawing with smoothing ---
-    let drawing = false;
-    let points = []; // {x,y,p}
-
     function strokeWidth(p) {
-      // mild pressure response (optional)
-      return BASE_WIDTH + (PRESSURE_BOOST * Math.max(0, Math.min(1, p)));
+      const pressure = Math.max(0, Math.min(1, p ?? 0.5));
+      return BASE_WIDTH + PRESSURE_BOOST * pressure;
     }
 
     function midpoint(a, b) {
       return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
     }
 
+    // -------- Robust scroll/gesture lock while signing --------
+    let lockedScrollY = 0;
+    let signing = false;
+
+    function lockScroll() {
+      if (signing) return;
+      signing = true;
+      lockedScrollY = window.scrollY || 0;
+      document.body.classList.add('scroll-locked');
+      document.body.style.top = `-${lockedScrollY}px`;
+    }
+
+    function unlockScroll() {
+      if (!signing) return;
+      signing = false;
+      document.body.classList.remove('scroll-locked');
+      document.body.style.top = '';
+      window.scrollTo(0, lockedScrollY);
+    }
+
+    // Extra belt-and-suspenders: block pinch zoom gestures on iOS
+    // (Safari emits gesture* events)
+    function blockIfSigning(e) {
+      if (signing) e.preventDefault();
+    }
+    document.addEventListener('touchmove', blockIfSigning, { passive: false });
+    document.addEventListener('gesturestart', blockIfSigning, { passive: false });
+    document.addEventListener('gesturechange', blockIfSigning, { passive: false });
+    document.addEventListener('gestureend', blockIfSigning, { passive: false });
+
+    // -------- Canvas sizing (keep it light while drawing) --------
+    let renderScale = 1;
+
+    function resizeCanvas() {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      renderScale = dpr; // keep interactive canvas light (robust)
+      canvas.width = Math.round(rect.width * renderScale);
+      canvas.height = Math.round(rect.height * renderScale);
+      ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.miterLimit = 2;
+      redrawAll(); // re-render strokes after resize
+    }
+    window.addEventListener('resize', resizeCanvas);
+
+    // -------- Store strokes as vectors for perfect export --------
+    let strokes = [];           // [{color, points:[{x,y,p}]}]
+    let currentStroke = null;
+
+    // bounds in CSS pixels (for cropping without scanning pixels)
+    let bounds = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+    function resetBounds() {
+      bounds = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+    }
+    function expandBounds(pt, w) {
+      const hw = w / 2;
+      bounds.minX = Math.min(bounds.minX, pt.x - hw);
+      bounds.minY = Math.min(bounds.minY, pt.y - hw);
+      bounds.maxX = Math.max(bounds.maxX, pt.x + hw);
+      bounds.maxY = Math.max(bounds.maxY, pt.y + hw);
+    }
+    function hasInk() {
+      return Number.isFinite(bounds.minX);
+    }
+
+    function getPt(e) {
+      const r = canvas.getBoundingClientRect();
+      return { x: e.clientX - r.left, y: e.clientY - r.top, p: e.pressure ?? 0.5 };
+    }
+
+    // -------- Draw incrementally using rAF (more stable under load) --------
+    let pending = [];
+    let rafId = 0;
+
+    function drawDot(pt, color) {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, strokeWidth(pt.p) / 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function drawLatestSegment(stroke) {
+      const pts = stroke.points;
+      const n = pts.length;
+      ctx.strokeStyle = stroke.color;
+
+      if (n === 1) {
+        drawDot(pts[0], stroke.color);
+        return;
+      }
+      if (n === 2) {
+        ctx.lineWidth = strokeWidth(pts[1].p);
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        ctx.lineTo(pts[1].x, pts[1].y);
+        ctx.stroke();
+        return;
+      }
+
+      const p0 = pts[n - 3], p1 = pts[n - 2], p2 = pts[n - 1];
+      const m1 = midpoint(p0, p1);
+      const m2 = midpoint(p1, p2);
+
+      ctx.lineWidth = strokeWidth(p1.p);
+      ctx.beginPath();
+      ctx.moveTo(m1.x, m1.y);
+      ctx.quadraticCurveTo(p1.x, p1.y, m2.x, m2.y);
+      ctx.stroke();
+    }
+
+    function flush() {
+      rafId = 0;
+      if (!currentStroke) return;
+
+      while (pending.length) {
+        const pt = pending.shift();
+        currentStroke.points.push(pt);
+
+        const w = strokeWidth(pt.p);
+        expandBounds(pt, w);
+
+        drawLatestSegment(currentStroke);
+      }
+    }
+
+    function scheduleFlush() {
+      if (rafId) return;
+      rafId = requestAnimationFrame(flush);
+    }
+
+    // -------- Robust pointer handling (window listeners + id tracking) --------
+    let activePenId = null;
+
+    function onMove(e) {
+      if (!currentStroke) return;
+      if (e.pointerId !== activePenId) return;
+      if (e.pointerType !== 'pen') return;
+
+      pending.push(getPt(e));
+      scheduleFlush();
+      e.preventDefault();
+    }
+
+    function endStroke(e) {
+      if (e.pointerId !== activePenId) return;
+
+      // flush remaining points before ending
+      flush();
+
+      window.removeEventListener('pointermove', onMove, { passive: false });
+      window.removeEventListener('pointerup', endStroke, { passive: false });
+      window.removeEventListener('pointercancel', cancelStroke, { passive: false });
+
+      activePenId = null;
+      currentStroke = null;
+      pending = [];
+
+      unlockScroll();
+      e.preventDefault();
+    }
+
+    function cancelStroke(e) {
+      // Safari cancels when it detects a scroll/gesture; we treat it as end, but keep data.
+      endStroke(e);
+    }
+
     canvas.addEventListener('pointerdown', (e) => {
       if (e.pointerType !== 'pen') { showHint(); return; }
 
-      drawing = true;
-      points = [];
-      canvas.setPointerCapture(e.pointerId);
+      // prevent page movement (this is the big robustness fix)
+      lockScroll();
 
-      const pt = getXY(e);
-      points.push(pt);
+      activePenId = e.pointerId;
 
-      // Start a tiny dot for taps
-      ctx.beginPath();
-      ctx.fillStyle = inkColor;
-      ctx.arc(pt.x, pt.y, strokeWidth(pt.p) / 2, 0, Math.PI * 2);
-      ctx.fill();
+      const pt = getPt(e);
+      currentStroke = { color: inkColor, points: [pt] };
+      strokes.push(currentStroke);
+
+      const w = strokeWidth(pt.p);
+      expandBounds(pt, w);
+
+      drawDot(pt, inkColor);
+
+      // listen on window (more robust than relying on element capture alone)
+      window.addEventListener('pointermove', onMove, { passive: false });
+      window.addEventListener('pointerup', endStroke, { passive: false });
+      window.addEventListener('pointercancel', cancelStroke, { passive: false });
 
       e.preventDefault();
-    });
+    }, { passive: false });
 
-    canvas.addEventListener('pointermove', (e) => {
-      if (!drawing) return;
-      if (e.pointerType !== 'pen') return;
+    // Optional: block context menu selection
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
-      const pt = getXY(e);
-      points.push(pt);
+    function redrawAll() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      // re-draw all stored strokes
+      for (const s of strokes) {
+        const pts = s.points;
+        if (!pts.length) continue;
 
-      ctx.strokeStyle = inkColor;
+        // dot
+        ctx.fillStyle = s.color;
+        ctx.strokeStyle = s.color;
 
-      // Draw smooth curve using last 3 points
-      const n = points.length;
-      if (n === 2) {
-        const p0 = points[0], p1 = points[1];
-        ctx.lineWidth = strokeWidth(p1.p);
+        if (pts.length === 1) {
+          drawDot(pts[0], s.color);
+          continue;
+        }
+
+        // first segment
+        ctx.lineWidth = strokeWidth(pts[1].p);
         ctx.beginPath();
-        ctx.moveTo(p0.x, p0.y);
-        ctx.lineTo(p1.x, p1.y);
+        ctx.moveTo(pts[0].x, pts[0].y);
+        ctx.lineTo(pts[1].x, pts[1].y);
         ctx.stroke();
-      } else if (n >= 3) {
-        const p0 = points[n - 3], p1 = points[n - 2], p2 = points[n - 1];
-        const m1 = midpoint(p0, p1);
-        const m2 = midpoint(p1, p2);
 
-        ctx.lineWidth = strokeWidth(p1.p);
-        ctx.beginPath();
-        ctx.moveTo(m1.x, m1.y);
-        ctx.quadraticCurveTo(p1.x, p1.y, m2.x, m2.y);
-        ctx.stroke();
+        // smoothed segments
+        for (let i = 2; i < pts.length; i++) {
+          const p0 = pts[i - 2], p1 = pts[i - 1], p2 = pts[i];
+          const m1 = midpoint(p0, p1);
+          const m2 = midpoint(p1, p2);
+
+          ctx.lineWidth = strokeWidth(p1.p);
+          ctx.beginPath();
+          ctx.moveTo(m1.x, m1.y);
+          ctx.quadraticCurveTo(p1.x, p1.y, m2.x, m2.y);
+          ctx.stroke();
+        }
       }
-
-      e.preventDefault();
-    });
-
-    function end(e) {
-      if (e.pointerType !== 'pen') return;
-      drawing = false;
-      try { canvas.releasePointerCapture(e.pointerId); } catch {}
-      e.preventDefault();
     }
-    canvas.addEventListener('pointerup', end);
-    canvas.addEventListener('pointercancel', end);
 
-    // --- Clear ---
+    // initialize sizing after functions exist
+    resizeCanvas();
+
+    // -------- Clear --------
     document.getElementById('clear').addEventListener('click', () => {
+      strokes = [];
+      currentStroke = null;
+      pending = [];
+      activePenId = null;
+      resetBounds();
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       out.innerHTML = '';
       line.style.display = ''; // show again
+      unlockScroll();
     });
 
-    // --- Crop to ink (transparent) ---
-    function cropToInk(paddingCssPx = 28) {
-      const w = canvas.width, h = canvas.height;
-      const img = ctx.getImageData(0, 0, w, h);
-      const data = img.data;
+    // -------- Export (cropped, transparent) by re-rendering at higher scale --------
+    function renderToExportCanvas(paddingCssPx = 24) {
+      if (!hasInk()) return null;
 
-      let minX = w, minY = h, maxX = -1, maxY = -1;
+      const pad = paddingCssPx;
+      const minX = Math.max(0, bounds.minX - pad);
+      const minY = Math.max(0, bounds.minY - pad);
+      const maxX = bounds.maxX + pad;
+      const maxY = bounds.maxY + pad;
 
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-          const i = (y * w + x) * 4;
-          if (data[i + 3] > 0) {
-            if (x < minX) minX = x;
-            if (y < minY) minY = y;
-            if (x > maxX) maxX = x;
-            if (y > maxY) maxY = y;
-          }
+      const wCss = Math.max(1, maxX - minX);
+      const hCss = Math.max(1, maxY - minY);
+
+      const exportScale = (window.devicePixelRatio || 1) * 2; // crisp output
+      const c = document.createElement('canvas');
+      c.width = Math.ceil(wCss * exportScale);
+      c.height = Math.ceil(hCss * exportScale);
+
+      const ectx = c.getContext('2d');
+      ectx.setTransform(exportScale, 0, 0, exportScale, 0, 0);
+      ectx.translate(-minX, -minY);
+      ectx.lineCap = 'round';
+      ectx.lineJoin = 'round';
+      ectx.miterLimit = 2;
+
+      // draw strokes onto export canvas
+      for (const s of strokes) {
+        const pts = s.points;
+        if (!pts.length) continue;
+
+        ectx.strokeStyle = s.color;
+        ectx.fillStyle = s.color;
+
+        if (pts.length === 1) {
+          ectx.beginPath();
+          ectx.arc(pts[0].x, pts[0].y, strokeWidth(pts[0].p)/2, 0, Math.PI*2);
+          ectx.fill();
+          continue;
+        }
+
+        ectx.lineWidth = strokeWidth(pts[1].p);
+        ectx.beginPath();
+        ectx.moveTo(pts[0].x, pts[0].y);
+        ectx.lineTo(pts[1].x, pts[1].y);
+        ectx.stroke();
+
+        for (let i = 2; i < pts.length; i++) {
+          const p0 = pts[i - 2], p1 = pts[i - 1], p2 = pts[i];
+          const m1 = midpoint(p0, p1);
+          const m2 = midpoint(p1, p2);
+
+          ectx.lineWidth = strokeWidth(p1.p);
+          ectx.beginPath();
+          ectx.moveTo(m1.x, m1.y);
+          ectx.quadraticCurveTo(p1.x, p1.y, m2.x, m2.y);
+          ectx.stroke();
         }
       }
-      if (maxX < 0) return null;
 
-      // padding passed in CSS px; convert to internal pixels
-      const pad = Math.round(paddingCssPx * renderScale);
-
-      minX = Math.max(0, minX - pad);
-      minY = Math.max(0, minY - pad);
-      maxX = Math.min(w - 1, maxX + pad);
-      maxY = Math.min(h - 1, maxY + pad);
-
-      const cw = maxX - minX + 1;
-      const ch = maxY - minY + 1;
-
-      const cropped = document.createElement('canvas');
-      cropped.width = cw;
-      cropped.height = ch;
-
-      const cctx = cropped.getContext('2d');
-      cctx.putImageData(ctx.getImageData(minX, minY, cw, ch), 0, 0);
-
-      return cropped;
+      return c;
     }
 
     function canvasToPngBlob(c) {
       return new Promise((resolve) => c.toBlob(resolve, 'image/png'));
     }
 
-    // --- Save ---
+    // -------- Save --------
     document.getElementById('save').addEventListener('click', async () => {
-      const cropped = cropToInk(30);
-      if (!cropped) {
+      // end any active stroke cleanly
+      if (signing) unlockScroll();
+
+      const exportCanvas = renderToExportCanvas(26);
+      if (!exportCanvas) {
         alert('Please sign with Apple Pencil before saving.');
         return;
       }
 
-      const blob = await canvasToPngBlob(cropped);
+      const blob = await canvasToPngBlob(exportCanvas);
       if (!blob) return;
 
-      // Requirement: line goes away after Save
+      // Requirement: line goes away after they click save
       line.style.display = 'none';
 
       const url = URL.createObjectURL(blob);
@@ -295,7 +495,10 @@
           </a>
           <button id="shareBtn" type="button">Share…</button>
         </div>
-        <img alt="Signature preview" src="${url}" />
+        <div class="mini">
+          <div style="margin-bottom:8px;opacity:.7">Preview</div>
+          <img alt="Signature preview" src="${url}" />
+        </div>
       `;
 
       document.getElementById('shareBtn').addEventListener('click', async () => {
