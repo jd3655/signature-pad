@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Pencil-only Signature</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 24px; }
+    .sig-wrap {
+      position: relative;
+      width: min(900px, 100%);
+      height: 260px;
+      border: 1px solid rgba(0,0,0,.15);
+      border-radius: 16px;
+      overflow: hidden;
+      background: transparent;
+    }
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      touch-action: none; /* prevent scrolling/zoom gestures in the signing box */
+    }
+    .sig-line {
+      position: absolute;
+      left: 24px;
+      right: 24px;
+      top: 72%;
+      height: 1px;
+      background: rgba(0,0,0,.45);
+      pointer-events: none;
+    }
+    .hint {
+      position: absolute;
+      left: 12px; top: 12px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      background: rgba(0,0,0,.65);
+      color: white;
+      font-size: 14px;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity .15s ease;
+    }
+    .hint.show { opacity: 1; }
+    .row { display: flex; gap: 12px; margin-top: 12px; align-items: center; flex-wrap: wrap; }
+    button { padding: 10px 14px; border-radius: 10px; border: 1px solid rgba(0,0,0,.2); background: white; }
+    button.primary { background: #0a66ff; color: white; border-color: #0a66ff; }
+    img { margin-top: 14px; max-width: 100%; border: 1px solid rgba(0,0,0,.15); border-radius: 12px; }
+  </style>
+</head>
+<body>
+  <h2>Sign with Apple Pencil</h2>
+
+  <div class="sig-wrap">
+    <canvas id="sig"></canvas>
+    <div class="sig-line" id="line"></div>
+    <div class="hint" id="hint">Apple Pencil only</div>
+  </div>
+
+  <div class="row">
+    <button id="clear">Clear</button>
+    <button class="primary" id="save">Save PNG (cropped, transparent)</button>
+  </div>
+
+  <div id="out"></div>
+
+  <script>
+    const canvas = document.getElementById('sig');
+    const ctx = canvas.getContext('2d');
+    const out = document.getElementById('out');
+    const line = document.getElementById('line');
+    const hint = document.getElementById('hint');
+
+    // Hi-DPI sizing
+    function resizeCanvas() {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.round(rect.width * dpr);
+      canvas.height = Math.round(rect.height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // draw in CSS pixels
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 4;
+    }
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+
+    function showHint() {
+      hint.classList.add('show');
+      clearTimeout(showHint._t);
+      showHint._t = setTimeout(() => hint.classList.remove('show'), 650);
+    }
+
+    let drawing = false;
+    let hasInk = false;
+
+    function getXY(e) {
+      const r = canvas.getBoundingClientRect();
+      return { x: e.clientX - r.left, y: e.clientY - r.top };
+    }
+
+    canvas.addEventListener('pointerdown', (e) => {
+      // Pencil-only
+      if (e.pointerType !== 'pen') { showHint(); return; }
+
+      if (!hasInk) {
+        hasInk = true;
+        line.style.display = 'none';
+      }
+
+      drawing = true;
+      canvas.setPointerCapture(e.pointerId);
+
+      const { x, y } = getXY(e);
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      e.preventDefault();
+    });
+
+    canvas.addEventListener('pointermove', (e) => {
+      if (!drawing) return;
+      if (e.pointerType !== 'pen') return;
+
+      const { x, y } = getXY(e);
+      ctx.lineTo(x, y);
+      ctx.stroke();
+      e.preventDefault();
+    });
+
+    function end(e) {
+      if (e.pointerType !== 'pen') return;
+      drawing = false;
+      try { canvas.releasePointerCapture(e.pointerId); } catch {}
+      e.preventDefault();
+    }
+    canvas.addEventListener('pointerup', end);
+    canvas.addEventListener('pointercancel', end);
+
+    document.getElementById('clear').addEventListener('click', () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      out.innerHTML = '';
+      hasInk = false;
+      line.style.display = '';
+    });
+
+    function cropToInk(padding = 36) {
+      const w = canvas.width, h = canvas.height;
+      const img = ctx.getImageData(0, 0, w, h);
+      const data = img.data;
+
+      let minX = w, minY = h, maxX = -1, maxY = -1;
+
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const i = (y * w + x) * 4;
+          if (data[i + 3] > 0) { // alpha
+            if (x < minX) minX = x;
+            if (y < minY) minY = y;
+            if (x > maxX) maxX = x;
+            if (y > maxY) maxY = y;
+          }
+        }
+      }
+      if (maxX < 0) return null;
+
+      minX = Math.max(0, minX - padding);
+      minY = Math.max(0, minY - padding);
+      maxX = Math.min(w - 1, maxX + padding);
+      maxY = Math.min(h - 1, maxY + padding);
+
+      const cw = maxX - minX + 1;
+      const ch = maxY - minY + 1;
+
+      const cropped = document.createElement('canvas');
+      cropped.width = cw;
+      cropped.height = ch;
+      const cctx = cropped.getContext('2d');
+
+      cctx.putImageData(ctx.getImageData(minX, minY, cw, ch), 0, 0);
+      return cropped;
+    }
+
+    function canvasToPngBlob(c) {
+      return new Promise((resolve) => c.toBlob(resolve, 'image/png'));
+    }
+
+    document.getElementById('save').addEventListener('click', async () => {
+      const cropped = cropToInk(36);
+      if (!cropped) {
+        alert('Please sign with Apple Pencil before saving.');
+        return;
+      }
+
+      const blob = await canvasToPngBlob(cropped);
+      if (!blob) return;
+
+      const url = URL.createObjectURL(blob);
+
+      // Preview + download fallback
+      out.innerHTML = `
+        <div class="row">
+          <a download="signature.png" href="${url}">
+            <button class="primary">Download signature.png</button>
+          </a>
+          <button id="shareBtn">Share…</button>
+        </div>
+        <img alt="Signature preview" src="${url}" />
+      `;
+
+      // Share sheet (best way to get into Files / another app). Works in supported Safari contexts.
+      // Navigator.share is the Web Share API. :contentReference[oaicite:1]{index=1}
+      document.getElementById('shareBtn').addEventListener('click', async () => {
+        const file = new File([blob], "signature.png", { type: "image/png" });
+        if (navigator.canShare?.({ files: [file] }) && navigator.share) {
+          await navigator.share({ files: [file], title: "Signature" });
+        } else {
+          alert("Sharing isn't available here — use Download instead.");
+        }
+      });
+    });
+  </script>
+</body>
+</html>
